@@ -11,7 +11,7 @@ There are two files of interest.
 1. A Jupyter Notebook that walks you through the ChatBot Implementation.
 2. A Streamlit app that can be deploy to create a UI Chatbot.
 
-Begin with the notebook to create the DynamoDB Table and test the implementation. 
+Begin with the **BedrockChatUI** notebook to create the DynamoDB Table and test the implementation. 
 
 To Deploy the streamlit app:
 1. Run the notebook to deploy a DynamoDB Table
