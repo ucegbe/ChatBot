@@ -21,6 +21,8 @@ config = Config(
 import re
 import numpy as np
 import openpyxl
+import inflect
+p = inflect.engine()
 from openpyxl.cell import Cell
 from openpyxl.worksheet.cell_range import CellRange
 from textractor import Textractor
@@ -196,7 +198,7 @@ def table_parser_utills(file):
     # determine table header index
     df = pd.DataFrame(worksheet.values)
     df=df.map(strip_newline)  
-    return df.to_csv(sep="|", index=False)
+    return df.to_csv(sep="|", index=False, header=0)
 
 
 class StreamHandler(BaseCallbackHandler):
@@ -288,11 +290,15 @@ def query_llm(params, handler):
     current_chat=get_chat_historie(params) 
     # Store uploaded file in S3
     if params['file']:
-        file_name=str(params['file'].name)
-        file_path=f"file_store/{file_name}"
-        S3.put_object(Body=params['file'].read(),Bucket= BUCKET, Key=file_path)
-        params['file_name']=f"s3://{BUCKET}/{file_path}"
-        doc=handle_doc_upload_or_s3(params['file_name'])
+        doc=''
+        for docs in params['file']:
+            file_name=str(docs.name)
+            file_path=f"file_store/{file_name}"
+            S3.put_object(Body=docs.read(),Bucket= BUCKET, Key=file_path)
+            params['file_name']=f"s3://{BUCKET}/{file_path}"
+            text=handle_doc_upload_or_s3(params['file_name'])
+            doc_name=os.path.basename(params['file_name'])
+            doc+=f"<{doc_name}>\n{text}\n</{doc_name}>\n"    
         # Chat template for document query
         with open("prompt/doc_chat.txt","r") as f:
             chat_template=f.read()
@@ -399,13 +405,12 @@ def app_sidebar():
         dict_items = list(user_chat_id.items())
         dict_items.insert(0, (st.session_state['user_sess'],"New Chat")) 
         if button:
-            st.write("yes")
             st.session_state['user_sess'] = f"{DYNAMODB_USER}-{str(time.time()).split('.')[0]}"
             dict_items.insert(0, (st.session_state['user_sess'],"New Chat"))      
         st.session_state['chat_session_list'] = dict(dict_items)
         chat_items=st.selectbox("previous chat sessions",st.session_state['chat_session_list'].values(),key="chat_sessions")
         session_id=get_key_from_value(st.session_state['chat_session_list'], chat_items)   
-        file = st.file_uploader('Upload a document') 
+        file = st.file_uploader('Upload a document', accept_multiple_files=True) 
         params={"model":model, "chat_id":session_id, "chat_item":chat_items, "file":file }  
         st.session_state['count']=1
         return params
