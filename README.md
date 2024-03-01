@@ -40,6 +40,6 @@ To run this Streamlit App on AWS EC2 (I tested this on the Ubuntu Image)
 * Install python3 and pip if not already installed
 * EC2 [instance profile role](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_switch-role-ec2_instance-profiles.html) has the required permissions to access the services used by this application mentioned above.
 * Install the dependencies in the requirements.txt file by running the command `sudo pip install -r req.txt`
-* Run command `tmux new -s mysession; python3 -m streamlit run bedrock-chat.py` to start the streamlit app.
-* Copy the external link generated and paste in a new browser tab.
-To stop the session, in your ec2 terminal Press `Ctrl+b`, then `d` to detach.
+* Run command `tmux new -s mysession`. Then in the new session created `cd` into the **ChatBot** dir and run `python3 -m streamlit run bedrock-chat.py` to start the streamlit app. This allows you to run the Streamlit application in the background and keep it running even if you disconnect from the terminal session.
+* Copy the **External URL** link generated and paste in a new browser tab.
+To stop the `tmux` session, in your ec2 terminal Press `Ctrl+b`, then `d` to detach. to kill the session, run `tmux kill-session -t mysession`
