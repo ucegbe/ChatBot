@@ -21,8 +21,6 @@ config = Config(
 import re
 import numpy as np
 import openpyxl
-import inflect
-p = inflect.engine()
 from openpyxl.cell import Cell
 from openpyxl.worksheet.cell_range import CellRange
 from textractor import Textractor
@@ -37,7 +35,7 @@ with open('config.json') as f:
 DYNAMODB_TABLE=config_file["DynamodbTable"]
 DYNAMODB_USER= config_file["UserId"]
 BUCKET=config_file["Bucket_Name"]
-
+OUTPUT_TOKEN=config_file["max-output-token"]
 S3 = boto3.client('s3')
 DYNAMODB  = boto3.resource('dynamodb')
 st.set_page_config(initial_sidebar_state="collapsed")
@@ -318,7 +316,7 @@ def query_llm(params, handler):
         }
         prompt=f"\n\nHuman: {chat_template.format(**values)}\n\nAssistant:"
     
-    inference_modifier = {'max_tokens_to_sample':2000, 
+    inference_modifier = {'max_tokens_to_sample':OUTPUT_TOKEN, 
                       "temperature":0.5,
                       # "top_k":250,
                       # "top_p":1,    
