@@ -21,6 +21,8 @@ config = Config(
 import re
 import numpy as np
 import openpyxl
+import inflect
+p = inflect.engine()
 from openpyxl.cell import Cell
 from openpyxl.worksheet.cell_range import CellRange
 from textractor import Textractor
@@ -83,10 +85,10 @@ def handle_doc_upload_or_s3(file):
             key = match.group(2)    
             obj = s3.get_object(Bucket=bucket_name, Key=key)        
             content = json.loads(obj['Body'].read())
-    elif "txt" in ext and "s3://" not in dir_name:
+    elif ext in [".txt",".py",".yml"]  and "s3://" not in dir_name:
         with open(file, "r") as txt_file:       
             content = txt_file.read()
-    elif  "txt" in ext and "s3://" in dir_name:
+    elif  ext in [".txt",".py",".yml"]  and "s3://" in dir_name:
         s3 = boto3.client('s3')
         match = re.match("s3://(.+?)/(.+)", file)
         if match:
