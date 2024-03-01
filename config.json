@@ -1,1 +1,1 @@
-{"DynamodbTable": "SessionChatHistory", "UserId": "test-user", "Bucket_Name": "YOUR BUCKET NAME"}
+{"DynamodbTable": "SessionChatHistory", "UserId": "test-user", "Bucket_Name": "YOUR BUCKET NAME", "max-output-token":2000}
