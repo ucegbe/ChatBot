@@ -40,5 +40,5 @@ To run this Streamlit App on AWS EC2 (I tested this on the Ubuntu Image)
 * Install python3 and pip if not already installed
 * EC2 [instance profile role](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_switch-role-ec2_instance-profiles.html) has the required permissions to access the services used by this application mentioned above.
 * Install the dependencies in the requirements.txt file by running the command `sudo pip install -r req.txt`
-* Run command `python3 -m streamlit run bedrock-chat.py --server.enableXsrfProtection false --server.enableCORS  false` 
+* Run command `python3 -m streamlit run bedrock-chat.py
 * Copy the external link and paste in a new browser tab
