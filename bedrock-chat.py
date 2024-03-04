@@ -21,8 +21,6 @@ config = Config(
 import re
 import numpy as np
 import openpyxl
-import inflect
-p = inflect.engine()
 from openpyxl.cell import Cell
 from openpyxl.worksheet.cell_range import CellRange
 from textractor import Textractor
@@ -30,7 +28,10 @@ from textractor.visualizers.entitylist import EntityList
 from textractor.data.constants import TextractFeatures
 from textractor.data.text_linearization_config import TextLinearizationConfig
 from boto3.dynamodb.conditions import Key 
-
+import time
+import random
+import logging
+from botocore.exceptions import ClientError
 # Read credentials
 with open('config.json') as f:
     config_file = json.load(f)
@@ -246,8 +247,8 @@ def get_chat_historie(params):
         chat_histories = DYNAMODB.Table(DYNAMODB_TABLE).get_item(Key={"UserId": DYNAMODB_USER, "SessionId":params["chat_id"]})
         if "Item" in chat_histories:
             #Only return the last 10 chat conversations
-            st.session_state['chat_hist']=chat_histories['Item']['messages'][-10:]
-            for chat in chat_histories['Item']['messages'][-10:]:
+            st.session_state['chat_hist']=chat_histories['Item']['messages'][-5:]
+            for chat in chat_histories['Item']['messages'][-5:]:
                 for k, v in chat.items():
                     current_chat+=v
  
@@ -282,6 +283,30 @@ def get_session_ids_by_user(table_name, user_id):
             print(e)
             pass
     return message_list
+
+def invoke_model_with_retry(model_client, prompt):
+    max_retries = 10
+    backoff_base = 2
+    max_backoff = 5  # Maximum backoff time in seconds
+    retries = 0
+
+    while True:
+        try:
+            response = model_client.invoke(prompt)
+            return response
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'ThrottlingException':
+                if retries < max_retries:
+                    backoff_value = min(max_backoff, backoff_base ** retries + random.uniform(0, 1))
+                    # logging.warning(f"Throttling Exception encountered. Retrying in {backoff_value} seconds.")
+                    time.sleep(backoff_value)
+                    retries += 1
+                else:
+                    # logging.error("Maximum retries exceeded. Unable to invoke the model.")
+                    raise e
+            else:
+                # logging.error("Unexpected error occurred: %s", e)
+                raise e
 
 def query_llm(params, handler):
     import json       
@@ -327,8 +352,8 @@ def query_llm(params, handler):
     llm = Bedrock(model_id=f"anthropic.{params['model']}", client=bedrock_runtime, model_kwargs = inference_modifier,
               streaming=True,  # Toggle this to turn streaming on or off
               callbacks=handler)
-
-    response = llm(prompt)
+    response=invoke_model_with_retry(llm,prompt)
+    # response = llm(prompt)
     claude = Anthropic()
     input_token=claude.count_tokens(chat_template)
     output_token=claude.count_tokens(response)
