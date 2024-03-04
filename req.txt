@@ -7,3 +7,4 @@ amazon-textract-textractor==1.7.1
 anthropic
 s3fs
 openpyxl
+inflect
