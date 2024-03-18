@@ -1,16 +1,11 @@
 import boto3
-from anthropic import Anthropic
 from botocore.config import Config
 import shutil
 import os
 import pandas as pd
 import json
 import io
-from langchain.llms.bedrock import Bedrock
-from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 import streamlit as st
-from langchain.llms.bedrock import Bedrock
-from langchain.callbacks.base import BaseCallbackHandler
 import time
 config = Config(
     read_timeout=600,
@@ -21,6 +16,7 @@ config = Config(
 import re
 import numpy as np
 import openpyxl
+import base64
 from openpyxl.cell import Cell
 from openpyxl.worksheet.cell_range import CellRange
 from textractor import Textractor
@@ -35,68 +31,68 @@ from botocore.exceptions import ClientError
 # Read credentials
 with open('config.json') as f:
     config_file = json.load(f)
+# pricing info
+with open('pricing.json') as f:
+    pricing_file = json.load(f)
+
 DYNAMODB_TABLE=config_file["DynamodbTable"]
-DYNAMODB_USER= config_file["UserId"]
 BUCKET=config_file["Bucket_Name"]
 OUTPUT_TOKEN=config_file["max-output-token"]
 S3 = boto3.client('s3')
 DYNAMODB  = boto3.resource('dynamodb')
-st.set_page_config(initial_sidebar_state="collapsed")
-
+st.set_page_config(initial_sidebar_state="auto")
+COGNITO = boto3.client('cognito-idp')
+S3_DOC_CACHE_PATH='uploads'
+TEXTRACT_RESULT_CACHE_PATH="textract_output"
+LOAD_DOC_IN_ALL_CHAT_CONVO=config_file["load-doc-in-chat-history"]
+CHAT_HISTORY_LENGTH=config_file["chat-history-loaded-length"]
+DYNAMODB_USER=config_file["UserId"]
+APP_ID=config_file["cognito-app-id"]
+USE_COGNITO=config_file["use-cognito"]
+REGION=config_file["bedrock-region"]
+bedrock_runtime = boto3.client(service_name='bedrock-runtime',region_name=REGION,config=config)
 
 if 'messages' not in st.session_state:
     st.session_state['messages'] = []
-if 'token' not in st.session_state:
-    st.session_state['token'] = 0
+if 'input_token' not in st.session_state:
+    st.session_state['input_token'] = 0
+if 'output_token' not in st.session_state:
+    st.session_state['output_token'] = 0
 if 'chat_hist' not in st.session_state:
     st.session_state['chat_hist'] = []
 if 'user_sess' not in st.session_state:
-    st.session_state['user_sess'] = f"{DYNAMODB_USER}-{str(time.time()).split('.')[0]}"
+    st.session_state['user_sess'] =f"{USE_COGNITO}-{str(time.time()).split('.')[0]}"
 if 'chat_session_list' not in st.session_state:
     st.session_state['chat_session_list'] = []
 if 'count' not in st.session_state:
     st.session_state['count'] = 0
-
+if 'userid' not in st.session_state:
+    st.session_state['userid']= config_file["UserId"]
+if 'cost' not in st.session_state:
+    st.session_state['cost'] = 0
 
 def handle_doc_upload_or_s3(file):
     """
-    Handle parsing of documents from local file system or S3.
-    Supports PDF, PNG, JPG, CSV, XLSX, JSON and Text files.
+    Handle parsing of documents uploaded.
+    Supports PDF, PNG, JPG, CSV, XLSX, JSON, Python Scripts and Text files.
     Parameters:
-        file (str): Path or S3 URI of document to parse
+        file (str): S3 URI of document to parse
     Returns:
         content: Parsed contents of the file in appropriate format
-    """
-    
+    """    
     dir_name, ext = os.path.splitext(file)
     if  ext in [".pdf", ".png", ".jpg"]:   
         content=exract_pdf_text_aws(file)
     elif "csv"  in ext:
         content= pd.read_csv(file)
     elif ext in [".xlsx", ".xlx"]:
-        content=table_parser_utills(file)
-    elif "json" in ext and "s3://" not in dir_name:
-        # with open(file) as json_file:       
-        content = json.load(file)
-    elif  "json" in ext and "s3://" in dir_name:
-        s3 = boto3.client('s3')
-        match = re.match("s3://(.+?)/(.+)", file)
-        if match:
-            bucket_name = match.group(1)
-            key = match.group(2)    
-            obj = s3.get_object(Bucket=bucket_name, Key=key)        
-            content = json.loads(obj['Body'].read())
-    elif ext in [".txt",".py",".yml"]  and "s3://" not in dir_name:
-        with open(file, "r") as txt_file:       
-            content = txt_file.read()
-    elif  ext in [".txt",".py",".yml"]  and "s3://" in dir_name:
-        s3 = boto3.client('s3')
-        match = re.match("s3://(.+?)/(.+)", file)
-        if match:
-            bucket_name = match.group(1)
-            key = match.group(2)    
-            obj = s3.get_object(Bucket=bucket_name, Key=key)        
-            content = obj['Body'].read()
+        content=table_parser_utills(file)   
+    elif  "json" in ext:      
+        obj=get_s3_obj_from_bucket_(file)
+        content = json.loads(obj['Body'].read())  
+    elif  ext in [".txt",".py"]:       
+        obj=get_s3_obj_from_bucket_(file)
+        content = obj['Body'].read()
     # Implement any of file extension logic 
     return content
 
@@ -104,16 +100,15 @@ def handle_doc_upload_or_s3(file):
 def exract_pdf_text_aws(file):
     """
     Extract text from PDF/image files using Amazon Textract service.
-    Supports PDFs/Images stored locally or in S3.    
+    Supports PDFs/Images stored uploaded.    
     Parameters:
-        file (str): Path or S3 URI of PDF file
+        file (str):S3 URI of PDF file
     Returns:
         text (str): Extracted text from PDF
     """     
     file_base_name=os.path.basename(file)
-    # Checking if extracted doc content is in S3
-    if [x for x in get_s3_keys("extracted_output/") if file_base_name in x]:      
-        response = S3.get_object(Bucket=BUCKET, Key=f"extracted_output/{file_base_name}.txt")
+    if [x for x in get_s3_keys(f"{TEXTRACT_RESULT_CACHE_PATH}/") if file_base_name in x]:      
+        response = S3.get_object(Bucket=BUCKET, Key=f"{TEXTRACT_RESULT_CACHE_PATH}/{file_base_name}.txt")
         text = response['Body'].read()
         return text
     
@@ -121,7 +116,7 @@ def exract_pdf_text_aws(file):
         dir_name, ext = os.path.splitext(file)
         extractor = Textractor(region_name="us-east-1")
         # Asynchronous call, you will experience some wait time. Try caching results for better experience
-        if "s3://" in file and "pdf" in ext:
+        if "pdf" in ext:
             logga=st.empty()
             logga.write("Asynchronous Textract call, you may experience some wait time.")
             document = extractor.start_document_analysis(
@@ -144,9 +139,8 @@ def exract_pdf_text_aws(file):
         hide_header_layout=False,    
         table_prefix="<table>",
         table_suffix="</table>",
-        )    
-        # Store extracted text in S3 
-        S3.put_object(Body=document.get_text(config=config), Bucket=BUCKET, Key=f"extracted_output/{file_base_name}.txt")      
+        )      
+        S3.put_object(Body=document.get_text(config=config), Bucket=BUCKET, Key=f"{TEXTRACT_RESULT_CACHE_PATH}/{file_base_name}.txt") 
         return document.get_text(config=config)
 
 def strip_newline(cell):
@@ -168,24 +162,19 @@ def table_parser_utills(file):
     Returns: 
         Pandas DataFrame representation of the Excel table
     """
-    # Read from S3 or local
-    if "s3://" in file:
-        s3 = boto3.client('s3')
-        match = re.match("s3://(.+?)/(.+)", file)
-        if match:
-            bucket_name = match.group(1)
-            key = match.group(2)    
-            obj = s3.get_object(Bucket=bucket_name, Key=key)  
-        # Read Excel file from S3 into a buffer
-        xlsx_buffer = io.BytesIO(obj['Body'].read())
-        xlsx_buffer.seek(0) 
-        # Load workbook, get active worksheet
-        wb = openpyxl.load_workbook(xlsx_buffer)
-        worksheet = wb.active
-    else:
-        # Load workbook, get active worksheet
-        wb = openpyxl.load_workbook(file)
-        worksheet = wb.active
+    # Read from S3 or local    
+    s3 = boto3.client('s3')
+    match = re.match("s3://(.+?)/(.+)", file)
+    if match:
+        bucket_name = match.group(1)
+        key = match.group(2)    
+        obj = s3.get_object(Bucket=bucket_name, Key=key)  
+    # Read Excel file from S3 into a buffer
+    xlsx_buffer = io.BytesIO(obj['Body'].read())
+    xlsx_buffer.seek(0) 
+    # Load workbook, get active worksheet
+    wb = openpyxl.load_workbook(xlsx_buffer)
+    worksheet = wb.active
     # Unmerge cells, duplicate merged values to individual cells
     all_merged_cell_ranges: list[CellRange] = list(
             worksheet.merged_cells.ranges
@@ -202,29 +191,74 @@ def table_parser_utills(file):
     return df.to_csv(sep="|", index=False, header=0)
 
 
-class StreamHandler(BaseCallbackHandler):
-    def __init__(self, container, initial_text=""):
-        self.container = container
-        self.text=initial_text
-    def on_llm_new_token(self, token: str, **kwargs) -> None:  
-        self.text+=token+""        
-        self.container.code(self.text)
-
-def put_db(messages, params):
+def put_db(params,messages):
     """Store long term chat history in DynamoDB"""    
     chat_item = {
-        "UserId": DYNAMODB_USER, # user id
-        "SessionId": params["chat_id"], # User session id
-        "messages": [messages]  # 'messages' is a list of dictionaries
+        "UserId": st.session_state['userid'], # user id
+        "SessionId": params["session_id"], # User session id
+        "messages": [messages],  # 'messages' is a list of dictionaries
+        "time":messages['time']
     }
-    existing_item = DYNAMODB.Table(DYNAMODB_TABLE).get_item(Key={"UserId": DYNAMODB_USER, "SessionId":params["chat_id"]})
+
+    existing_item = DYNAMODB.Table(DYNAMODB_TABLE).get_item(Key={"UserId": st.session_state['userid'], "SessionId":params["session_id"]})
     if "Item" in existing_item:
         existing_messages = existing_item["Item"]["messages"]
         chat_item["messages"] = existing_messages + [messages]
-
     response = DYNAMODB.Table(DYNAMODB_TABLE).put_item(
         Item=chat_item
-    ) 
+    )
+    
+def get_chat_history_db(params,cutoff):
+    current_chat, chat_hist=[],[]
+    claude3=False
+    if "sonnet" in params['model'] or "haiku" in params['model']:
+        claude3=True
+    if "Item" in params['chat_histories']:  
+        chat_hist=params['chat_histories']['Item']['messages'][-cutoff:]            
+        for d in chat_hist:
+            if d['image'] and claude3 and LOAD_DOC_IN_ALL_CHAT_CONVO:
+                content=[]
+                for img in d['image']:
+                    s3 = boto3.client('s3')
+                    match = re.match("s3://(.+?)/(.+)", img)
+                    image_name=os.path.basename(img)
+                    _,ext=os.path.splitext(image_name)
+                    if "jpg" in ext: ext=".jpeg"                        
+                    if match:
+                        bucket_name = match.group(1)
+                        key = match.group(2)    
+                        obj = s3.get_object(Bucket=bucket_name, Key=key)
+                        base_64_encoded_data = base64.b64encode(obj['Body'].read())
+                        base64_string = base_64_encoded_data.decode('utf-8')                        
+                    content.extend([{"type":"text","text":image_name},{
+                      "type": "image",
+                      "source": {
+                        "type": "base64",
+                        "media_type": f"image/{ext.lower().replace('.','')}",
+                        "data": base64_string
+                      }
+                    }])
+                content.extend([{"type":"text","text":d['user']}])
+                current_chat.append({'role': 'user', 'content': content})
+            if d['document'] and LOAD_DOC_IN_ALL_CHAT_CONVO:
+                doc='Here are the documents:\n'
+                for docs in d['document']:
+                    uploads=handle_doc_upload_or_s3(docs)
+                    doc_name=os.path.basename(docs)
+                    doc+=f"<{doc_name}>\n{uploads}\n</{doc_name}>\n"
+                if not claude3 and d["image"]:
+                    for docs in d['image']:
+                        uploads=handle_doc_upload_or_s3(docs)
+                        doc_name=os.path.basename(docs)
+                        doc+=f"<{doc_name}>\n{uploads}\n</{doc_name}>\n"
+                current_chat.append({'role': 'user', 'content': [{"type":"text","text":doc+d['user']}]})
+            else:
+                current_chat.append({'role': 'user', 'content': [{"type":"text","text":d['user']}]})
+            current_chat.append({'role': 'assistant', 'content': d['assistant']})  
+    else:
+        chat_hist=[]
+    return current_chat, chat_hist
+
     
 def get_s3_keys(prefix):
     s3 = boto3.client('s3')
@@ -238,26 +272,124 @@ def get_s3_keys(prefix):
             keys.append(name)
     return keys
 
-def get_chat_historie(params):
+def get_s3_obj_from_bucket_(file):
+    """Retrieves an object from an S3 bucket given its S3 URI.
+    Args:
+       file (str): The S3 URI of the object to retrieve, in the format "s3://{bucket_name}/{key}".
+   Returns:
+       botocore.response.StreamingBody: The retrieved S3 object.
     """
-    This function retrieves chat history stored in a dynamoDB table partitioned by a userID and sorted by a SessionID
+    s3 = boto3.client('s3')
+    match = re.match("s3://(.+?)/(.+)", file)
+    if match:
+        bucket_name = match.group(1)
+        key = match.group(2)    
+        obj = s3.get_object(Bucket=bucket_name, Key=key)  
+    return obj
+
+def put_obj_in_s3_bucket_(docs):
+    """Uploads a file to an S3 bucket and returns the S3 URI of the uploaded object.
+    Args:
+       docs (str): The local file path of the file to upload to S3.
+   Returns:
+       str: The S3 URI of the uploaded object, in the format "s3://{bucket_name}/{file_path}".
     """
-    current_chat=""
-    if DYNAMODB_TABLE:
-        chat_histories = DYNAMODB.Table(DYNAMODB_TABLE).get_item(Key={"UserId": DYNAMODB_USER, "SessionId":params["chat_id"]})
-        if "Item" in chat_histories:
-            #Only return the last 10 chat conversations
-            st.session_state['chat_hist']=chat_histories['Item']['messages'][-5:]
-            for chat in chat_histories['Item']['messages'][-5:]:
-                for k, v in chat.items():
-                    current_chat+=v
- 
-    elif st.session_state['chat_hist']:
-        st.session_state['chat_hist']=st.session_state['chat_hist'][-10:]
-        for chat in st.session_state['chat_hist']:
-            for k, v in chat.items():
-                current_chat+=v
-    return current_chat
+    file_name=os.path.basename(docs.name)
+    file_path=f"{S3_DOC_CACHE_PATH}/{file_name}"
+    S3.put_object(Body=docs.read(),Bucket= BUCKET, Key=file_path)
+    return f"s3://{BUCKET}/{file_path}"
+
+
+def bedrock_streemer(params,response, handler):
+    stream = response.get('body')
+    answer = ""    
+    if stream:
+        for event in stream:
+            chunk = event.get('chunk')
+            if  chunk:
+                chunk_obj = json.loads(chunk.get('bytes').decode())
+                if "delta" in chunk_obj:                    
+                    delta = chunk_obj['delta']
+                    if "text" in delta:
+                        text=delta['text'] 
+                        # st.write(text, end="")                        
+                        answer+=str(text)       
+                        handler.markdown(answer.replace("$","USD ").replace("%", " percent"))
+                        
+                if "amazon-bedrock-invocationMetrics" in chunk_obj:
+                    st.session_state['input_token'] = chunk_obj['amazon-bedrock-invocationMetrics']['inputTokenCount']
+                    st.session_state['output_token'] =chunk_obj['amazon-bedrock-invocationMetrics']['outputTokenCount']
+                    pricing=st.session_state['input_token']*pricing_file[f"anthropic.{params['model']}"]["input"]+st.session_state['output_token'] *pricing_file[f"anthropic.{params['model']}"]["output"]
+                    st.session_state['cost']+=pricing             
+    return answer
+
+def bedrock_claude_(params,chat_history,system_message, prompt,model_id,image_path=None, handler=None):
+    content=[{
+        "type": "text",
+        "text": prompt
+            }]
+    if image_path:       
+        if not isinstance(image_path, list):
+            image_path=[image_path]      
+        for img in image_path:
+            s3 = boto3.client('s3')
+            match = re.match("s3://(.+?)/(.+)", img)
+            image_name=os.path.basename(img)
+            _,ext=os.path.splitext(image_name)
+            if "jpg" in ext: ext=".jpeg"                        
+            if match:
+                bucket_name = match.group(1)
+                key = match.group(2)    
+                obj = s3.get_object(Bucket=bucket_name, Key=key)
+                base_64_encoded_data = base64.b64encode(obj['Body'].read())
+                base64_string = base_64_encoded_data.decode('utf-8')
+            content.extend([{"type":"text","text":image_name},{
+              "type": "image",
+              "source": {
+                "type": "base64",
+                "media_type": f"image/{ext.lower().replace('.','')}",
+                "data": base64_string
+              }
+            }])
+    chat_history.append({"role": "user",
+            "content": content})
+    # print(system_message)
+    prompt = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 1500,
+        "temperature": 0.5,
+        "system":system_message,
+        "messages": chat_history
+    }
+    answer = ""
+    prompt = json.dumps(prompt)
+    response = bedrock_runtime.invoke_model_with_response_stream(body=prompt, modelId=model_id, accept="application/json", contentType="application/json")
+    answer=bedrock_streemer(params,response, handler) 
+    return answer
+
+def _invoke_bedrock_with_retries(params,current_chat, chat_template, question, model_id, image_path, handler):
+    max_retries = 5
+    backoff_base = 2
+    max_backoff = 3  # Maximum backoff time in seconds
+    retries = 0
+
+    while True:
+        try:
+            response = bedrock_claude_(params,current_chat, chat_template, question, model_id, image_path, handler)
+            return response
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'ThrottlingException':
+                if retries < max_retries:
+                    # Throttling, exponential backoff
+                    sleep_time = min(max_backoff, backoff_base ** retries + random.uniform(0, 1))
+                    time.sleep(sleep_time)
+                    retries += 1
+                else:
+                    raise e
+            else:
+                # Some other API error, rethrow
+                raise
+                
 
 def get_session_ids_by_user(table_name, user_id):
     """
@@ -284,122 +416,117 @@ def get_session_ids_by_user(table_name, user_id):
             pass
     return message_list
 
-def invoke_model_with_retry(model_client, prompt):
-    max_retries = 10
-    backoff_base = 2
-    max_backoff = 5  # Maximum backoff time in seconds
-    retries = 0
-
-    while True:
-        try:
-            response = model_client.invoke(prompt)
-            return response
-        except ClientError as e:
-            if e.response['Error']['Code'] == 'ThrottlingException':
-                if retries < max_retries:
-                    backoff_value = min(max_backoff, backoff_base ** retries + random.uniform(0, 1))
-                    # logging.warning(f"Throttling Exception encountered. Retrying in {backoff_value} seconds.")
-                    time.sleep(backoff_value)
-                    retries += 1
-                else:
-                    # logging.error("Maximum retries exceeded. Unable to invoke the model.")
-                    raise e
-            else:
-                # logging.error("Unexpected error occurred: %s", e)
-                raise e
 
 def query_llm(params, handler):
-    import json       
-    bedrock_runtime = boto3.client(service_name='bedrock-runtime',region_name='us-east-1',config=config)
-    # Get chat history from DynamoDB Table
-    current_chat=get_chat_historie(params) 
-    # Store uploaded file in S3
-    if params['file']:
-        doc=''
-        for docs in params['file']:
-            file_name=str(docs.name)
-            file_path=f"file_store/{file_name}"
-            S3.put_object(Body=docs.read(),Bucket= BUCKET, Key=file_path)
-            params['file_name']=f"s3://{BUCKET}/{file_path}"
-            text=handle_doc_upload_or_s3(params['file_name'])
-            doc_name=os.path.basename(params['file_name'])
-            doc+=f"<{doc_name}>\n{text}\n</{doc_name}>\n"    
-        # Chat template for document query
-        with open("prompt/doc_chat.txt","r") as f:
-            chat_template=f.read()
-        values = {
-        "doc": doc,
-        "prompt": params['prompt'],
-        "current_chat": current_chat,
-        }
-        prompt=f"\n\nHuman: {chat_template.format(**values)}\n\nAssistant:"
+    """
+    Function takes a user query and a uploaded document. Caches documents in S3
+    passing a document is optional
+    """  
+    if not isinstance(params['upload_doc'], list):
+        raise TypeError("documents must be in a list format")        
+    # Check if Claude3 model is used and handle images with the CLAUDE3 Model
+    claude3=False
+    model='anthropic.'+params['model']
+    if "sonnet" in model or "haiku" in model:
+        model+="-20240229-v1:0" if "sonnet" in model else "-20240307-v1:0"
+        claude3=True
+    # Retrieve past chat history from Dynamodb
+    if DYNAMODB_TABLE:
+        current_chat,chat_hist=get_chat_history_db(params, CHAT_HISTORY_LENGTH)
     else:
+        for d in chat_hist:
+            current_chat.append({'role': 'user', 'content': d['user']})
+            current_chat.append({'role': 'assistant', 'content': d['assistant']})
+    # print(current_chat)
+    ## prompt template for when a user uploads a doc
+    doc_path=[]
+    image_path=[]
+    doc=""
+    if params['upload_doc']:  
+        doc='Here are documents:\n'
+        for ids,docs in enumerate(params['upload_doc']):
+            file_name=docs.name
+            _,extensions=os.path.splitext(file_name)
+            docs=put_obj_in_s3_bucket_(docs)
+            if extensions in [".jpg",".jpeg",".png",".gif",".webp"] and claude3:
+                print("yes")
+                image_path.append(docs)
+                continue
+            uploads=handle_doc_upload_or_s3(docs)             
+            doc_path.append(docs)
+            doc_name=os.path.basename(docs)
+            doc+=f"<{doc_name}>\n{uploads}\n</{doc_name}>\n"
+        with open("prompt/doc_chat.txt","r") as f:
+            chat_template=f.read()       
+    else:        
         # Chat template for open ended query
         with open("prompt/chat.txt","r") as f:
             chat_template=f.read()
-        values = {
-        "prompt": params['prompt'],
-        "current_chat": current_chat,
-        }
-        prompt=f"\n\nHuman: {chat_template.format(**values)}\n\nAssistant:"
-    
-    inference_modifier = {'max_tokens_to_sample':OUTPUT_TOKEN, 
-                      "temperature":0.5,
-                      # "top_k":250,
-                      # "top_p":1,    
-                      "stop_sequences": ["Human:"]
-                     }
-    llm = Bedrock(model_id=f"anthropic.{params['model']}", client=bedrock_runtime, model_kwargs = inference_modifier,
-              streaming=True,  # Toggle this to turn streaming on or off
-              callbacks=handler)
-    response=invoke_model_with_retry(llm,prompt)
-    # response = llm(prompt)
-    claude = Anthropic()
-    input_token=claude.count_tokens(chat_template)
-    output_token=claude.count_tokens(response)
-    tokens=input_token+output_token
-    st.session_state['token']+=tokens
-    # Update Dynamo DB table with current chat
-    chat_history={"user": f"{params['prompt']}",
-    "assiatant":f"\n\nAssistant: {response}\n\nHuman: "}           
+
+    response=_invoke_bedrock_with_retries(params,current_chat, chat_template, doc+params['question'], model, image_path, handler)
+    # log the following items to dynamodb
+    chat_history={"user":params['question'],
+    "assistant":response,
+    "image":image_path,
+    "document":doc_path,
+    "modelID":model,
+    "time":str(time.time()),
+    "input_token":round(st.session_state['input_token']) ,
+    "output_token":round(st.session_state['output_token'])} 
+    #store convsation memory and user other items in DynamoDB table
     if DYNAMODB_TABLE:
-        put_db(chat_history, params)
+        put_db(params,chat_history)
+    # use local memory for storage
     else:
-        st.session_state['chat_hist'].append(chat_history)
+        chat_hist.append(chat_history)   
     return response
 
-def db_message_2_streamlit_chat(current_chat):
+
+def get_chat_historie_for_streamlit(params):
     """
-    Convert Chat history to fit streamlits syntax, when prepopulating previous chat in the UI.
+    This function retrieves chat history stored in a dynamoDB table partitioned by a userID and sorted by a SessionID
     """
-    import re
-    parsed_data = []
-    string=current_chat.replace("\n\nAssistant:","<<<Assistance>>>").replace("\n\nHuman:","<<</Assistance>>>")
-    pattern = re.compile(r'<<<[^>]+>>>')
-    segments = re.split(pattern, string)
-    for ids,message in enumerate(segments):
-        if ids%2==0:
-            parsed_data.append({"role":"user","content":message.replace("Question:","")})
-        else:
-            parsed_data.append({"role":"assistant","content":message})
-    return parsed_data
+    chat_histories = DYNAMODB.Table(DYNAMODB_TABLE).get_item(Key={"UserId": st.session_state['userid'], "SessionId":params["session_id"]})
+
+# Constructing the desired list of dictionaries
+    formatted_data = []
+    if 'Item' in chat_histories:
+        for entry in chat_histories['Item']['messages']:
+            # assistant_attachment = entry.get('image', []) + entry.get('document', [])
+            assistant_attachment = '\n\n'.join(entry.get('image', []) + entry.get('document', []))
+            formatted_data.append({
+                "role": "user",
+                "content": entry["user"],
+            })
+            formatted_data.append({
+                "role": "assistant",
+                "content": entry["assistant"],
+                "attachment": assistant_attachment
+            })
+    else:
+        chat_histories=[]            
+    return formatted_data,chat_histories
+
+
 
 def get_key_from_value(dictionary, value):
     return next((key for key, val in dictionary.items() if val == value), None)
     
 def chat_bedrock_(params):
-    if params["chat_item"].strip():
-        restored_chat=get_chat_historie(params)
-        curr_message=db_message_2_streamlit_chat(restored_chat)
-        curr_message.pop()
-        st.session_state.messages=curr_message
-        
+    st.title('Chatty AI Assitant 🙂')
+    params['chat_histories']=[]
+    if params["session_id"].strip():
+        st.session_state.messages, params['chat_histories']=get_chat_historie_for_streamlit(params)
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):   
             if "```" in message["content"]:
                 st.markdown(message["content"],unsafe_allow_html=True )
             else:
                 st.markdown(message["content"].replace("$", "\$"),unsafe_allow_html=True )
+            if message["role"]=="assistant":
+                if message["attachment"]:
+                    with st.expander(label="**attachments**"):
+                        st.markdown(message["attachment"])
     if prompt := st.chat_input("Whats up?"):        
         st.session_state.messages.append({"role": "user", "content": prompt})        
         with st.chat_message("user"):             
@@ -409,43 +536,87 @@ def chat_bedrock_(params):
                 st.markdown(prompt.replace("$", "\$"),unsafe_allow_html=True )
         with st.chat_message("assistant"): 
             message_placeholder = st.empty()
-            stream_handler = StreamHandler(message_placeholder)
             time_now=time.time()            
-            params["prompt"]=prompt
-            answer=query_llm(params, [stream_handler])
+            params["question"]=prompt
+            answer=query_llm(params, message_placeholder)
             if "```" in answer:
                 message_placeholder.markdown(answer,unsafe_allow_html=True )
             else:
                 message_placeholder.markdown(answer.replace("$", "\$"),unsafe_allow_html=True )
             st.session_state.messages.append({"role": "assistant", "content": answer}) 
+        st.rerun()
         
 def app_sidebar():
-    with st.sidebar:          
-        holder=st.empty()
+    with st.sidebar:   
+        st.metric(label="Bedrock Session Cost", value=f"${round(st.session_state['cost'],2)}") 
+        st.write("-----")
         button=st.button("New Chat", type ="primary")
-        models=[ 'claude-instant-v1','claude-v2:1', 'claude-v2']
-        model=st.selectbox('Model', models, index=2)
+        models=[ 'claude-3-sonnet','claude-3-haiku','claude-instant-v1','claude-v2:1', 'claude-v2']
+        model=st.selectbox('**Model**', models)
         params={"model":model}       
-        user_chat_id=get_session_ids_by_user(DYNAMODB_TABLE, DYNAMODB_USER)
-        dict_items = list(user_chat_id.items())
+        user_sess_id=get_session_ids_by_user(DYNAMODB_TABLE, st.session_state['userid'])
+        dict_items = list(user_sess_id.items())
         dict_items.insert(0, (st.session_state['user_sess'],"New Chat")) 
         if button:
-            st.session_state['user_sess'] = f"{DYNAMODB_USER}-{str(time.time()).split('.')[0]}"
+            st.session_state['user_sess'] = f"{st.session_state['userid']}-{str(time.time()).split('.')[0]}"
             dict_items.insert(0, (st.session_state['user_sess'],"New Chat"))      
         st.session_state['chat_session_list'] = dict(dict_items)
-        chat_items=st.selectbox("previous chat sessions",st.session_state['chat_session_list'].values(),key="chat_sessions")
+        chat_items=st.selectbox("**Chat Sessions**",st.session_state['chat_session_list'].values(),key="chat_sessions")
         session_id=get_key_from_value(st.session_state['chat_session_list'], chat_items)   
-        file = st.file_uploader('Upload a document', accept_multiple_files=True) 
-        params={"model":model, "chat_id":session_id, "chat_item":chat_items, "file":file }  
+        file = st.file_uploader('Upload a document', accept_multiple_files=True, help="pdf,csv,txt,png,jpg,xlsx,json,py doc format supported") 
+        params={"model":model, "session_id":session_id, "chat_item":chat_items, "upload_doc":file }    
         st.session_state['count']=1
         return params
 
-    
+def check_password():
+    """Returns `True` if the user had a correct password."""
+    def login_form():
+        """Form with widgets to collect user information"""
+        with st.form("Credentials"):
+            st.text_input("Username", key="username")
+            st.text_input("Password", type="password", key="password")
+            st.form_submit_button("Log in", on_click=password_entered)
+    def password_entered():
+        """Checks whether a password entered by the user is correct."""
+        try:
+            cred=COGNITO.initiate_auth(
+                AuthFlow='USER_PASSWORD_AUTH',
+                AuthParameters={
+                 "USERNAME": st.session_state["username"],
+                "PASSWORD": st.session_state["password"],
+                },
+                ClientId=APP_ID,
+            )              
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # Don't store the username or password.  
+            st.session_state['userid']=st.session_state['username']
+            st.session_state['user_sess'] = f"{st.session_state['username']}-{str(time.time()).split('.')[0]}"   
+            del st.session_state["username"]      
+        except COGNITO.exceptions.NotAuthorizedException as e:
+            if "Incorrect username or password" in str(e):
+                st.session_state["password_correct"] = False
+        except client.exceptions.PasswordResetRequiredException:
+            st.error("Password reset is required. Please reset your password.")
+        except ClientError as e:
+            st.error(f"An error occurred: {str(e)}")
+        except Exception as e:
+            st.error(f"An unexpected error occurred: {str(e)}")
+
+    if st.session_state.get("password_correct", False):
+        return True
+    login_form()
+    if "password_correct" in st.session_state:
+        st.error("😕 Username or password incorrect")
+    return False
     
 def main():    
+    if USE_COGNITO:
+        if not check_password():
+            st.stop()
     params=app_sidebar()
     chat_bedrock_(params)
    
     
 if __name__ == '__main__':
     main()   
+    
