@@ -324,10 +324,7 @@ def bedrock_streemer(params,response, handler):
     return answer
 
 def bedrock_claude_(params,chat_history,system_message, prompt,model_id,image_path=None, handler=None):
-    content=[{
-        "type": "text",
-        "text": prompt
-            }]
+    content=[]
     if image_path:       
         if not isinstance(image_path, list):
             image_path=[image_path]      
@@ -351,17 +348,21 @@ def bedrock_claude_(params,chat_history,system_message, prompt,model_id,image_pa
                 "data": base64_string
               }
             }])
+    content.append({
+        "type": "text",
+        "text": prompt
+            })
     chat_history.append({"role": "user",
             "content": content})
     # print(system_message)
     prompt = {
         "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 1500,
+        "max_tokens": 2500,
         "temperature": 0.5,
         "system":system_message,
         "messages": chat_history
     }
-    answer = ""
+    
     prompt = json.dumps(prompt)
     response = bedrock_runtime.invoke_model_with_response_stream(body=prompt, modelId=model_id, accept="application/json", contentType="application/json")
     answer=bedrock_streemer(params,response, handler) 
