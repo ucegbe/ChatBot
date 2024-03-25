@@ -61,7 +61,7 @@ if 'output_token' not in st.session_state:
 if 'chat_hist' not in st.session_state:
     st.session_state['chat_hist'] = []
 if 'user_sess' not in st.session_state:
-    st.session_state['user_sess'] =f"{USE_COGNITO}-{str(time.time()).split('.')[0]}"
+    st.session_state['user_sess'] =f"{DYNAMODB_USER}-{str(time.time()).split('.')[0]}"
 if 'chat_session_list' not in st.session_state:
     st.session_state['chat_session_list'] = []
 if 'count' not in st.session_state:
@@ -240,7 +240,7 @@ def get_chat_history_db(params,cutoff):
                     }])
                 content.extend([{"type":"text","text":d['user']}])
                 current_chat.append({'role': 'user', 'content': content})
-            if d['document'] and LOAD_DOC_IN_ALL_CHAT_CONVO:
+            elif d['document'] and LOAD_DOC_IN_ALL_CHAT_CONVO:
                 doc='Here are the documents:\n'
                 for docs in d['document']:
                     uploads=handle_doc_upload_or_s3(docs)
@@ -324,6 +324,10 @@ def bedrock_streemer(params,response, handler):
     return answer
 
 def bedrock_claude_(params,chat_history,system_message, prompt,model_id,image_path=None, handler=None):
+    # content=[{
+    #     "type": "text",
+    #     "text": prompt
+    #         }]
     content=[]
     if image_path:       
         if not isinstance(image_path, list):
@@ -357,19 +361,19 @@ def bedrock_claude_(params,chat_history,system_message, prompt,model_id,image_pa
     # print(system_message)
     prompt = {
         "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 2500,
+        "max_tokens": 1500,
         "temperature": 0.5,
         "system":system_message,
         "messages": chat_history
     }
-    
+    answer = ""
     prompt = json.dumps(prompt)
     response = bedrock_runtime.invoke_model_with_response_stream(body=prompt, modelId=model_id, accept="application/json", contentType="application/json")
     answer=bedrock_streemer(params,response, handler) 
     return answer
 
 def _invoke_bedrock_with_retries(params,current_chat, chat_template, question, model_id, image_path, handler):
-    max_retries = 5
+    max_retries = 10
     backoff_base = 2
     max_backoff = 3  # Maximum backoff time in seconds
     retries = 0
@@ -434,6 +438,8 @@ def query_llm(params, handler):
     # Retrieve past chat history from Dynamodb
     if DYNAMODB_TABLE:
         current_chat,chat_hist=get_chat_history_db(params, CHAT_HISTORY_LENGTH)
+        # st.write(chat_hist)
+        # st.stop()
     else:
         for d in chat_hist:
             current_chat.append({'role': 'user', 'content': d['user']})
@@ -455,10 +461,21 @@ def query_llm(params, handler):
                 continue
             uploads=handle_doc_upload_or_s3(docs)             
             doc_path.append(docs)
+            
             doc_name=os.path.basename(docs)
             doc+=f"<{doc_name}>\n{uploads}\n</{doc_name}>\n"
         with open("prompt/doc_chat.txt","r") as f:
-            chat_template=f.read()       
+            chat_template=f.read() 
+        
+        
+        document_values = []
+        for items in chat_hist:
+            document_values.extend(items["document"])
+        difference = set(document_values) ^ set(doc_path)   
+        if not difference:
+            doc=""
+            doc_path=[]
+        
     else:        
         # Chat template for open ended query
         with open("prompt/chat.txt","r") as f:
