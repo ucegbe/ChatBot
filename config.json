@@ -1,1 +1,1 @@
-{"DynamodbTable": "SessionChatHistory", "UserId": "test-user-sonnet7", "Bucket_Name": "BUCKET NAME", "max-output-token":2000, "cognito-app-id":"COGNITO APP ID", "use-cognito":false, "chat-history-loaded-length":5, "bedrock-region":"us-west-2", "load-doc-in-chat-history":true}
+{"DynamodbTable": "SessionChatHistory", "UserId": "test-user-sonnet7", "Bucket_Name": "BUCKET NAME", "max-output-token":2000, "cognito-app-id":"COGNITO APP ID (Optional)", "use-cognito":false, "chat-history-loaded-length":10, "bedrock-region":"us-west-2", "load-doc-in-chat-history":true}
